@@ -1,0 +1,4 @@
+backups/
+.env
+credentials.json
+.DS_Store
