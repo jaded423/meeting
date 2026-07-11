@@ -8,9 +8,18 @@ Transcription MCP — packages the `trans` stack (audio/URL/file → transcript)
 
 ## Status
 
-Scaffolded 2026-07-08 via `/newdir` (T0). **Dir born, MCP not built yet.** Built later by the `mcp` session from here. Blocked on `trans` landing FILE input + code-review (this MCP wraps the `trans` stack — see its TODO).
+**Core BUILT 2026-07-09** (mcp session; steps 4–5 of the baton plan). Server package in `meeting/`; 13 tests pass; transcribe + text-passthrough + status all verified on real input. **Remaining = step 6** (register in `mcp` `install-all.sh` `REPOS=` + distribute to Cody + global routing-map register — that last is T0's step 7). Open Qs for Cody: Mac specs + Plaud-device-vs-file input.
 
-**Design doc (the what/why/how, engine bench, routing, human-in-loop):** [`~/projects/trans/docs/meeting-to-tasks-pipeline.md`](~/projects/trans/docs/meeting-to-tasks-pipeline.md). Delivery = 2 MCPs on Cody's Claude Desktop (`meeting` transcribes + `gsuite` routes to Calendar/Tasks); Cody's Claude = the extraction brain. Peer of `gsuite`/`leadscout` under the `mcp` hub; uses `trans`, not org-coupled to it.
+**Design doc (the what/why/how, engine bench, routing, human-in-loop):** [`~/projects/trans/docs/meeting-to-tasks-pipeline.md`](~/projects/trans/docs/meeting-to-tasks-pipeline.md). Delivery = 2 MCPs on Cody's Claude Desktop (`meeting` transcribes + `gsuite` routes to Calendar/Tasks); Cody's Claude = the extraction brain. Peer of `gsuite`/`leadscout` under the `mcp` hub; uses `trans`, not org-coupled to it. Baton plan: [`~/.claude/plans/meeting-mcp-build.md`](~/.claude/plans/meeting-mcp-build.md).
+
+## Surface (what it exposes)
+
+Correct-minimal: `meeting` only does media→text; **gsuite** owns Calendar/Tasks routing, the **host Claude** owns extraction.
+
+- **`meeting.transcribe`** (tool) — audio/video file · yt-dlp URL · or text file (`.txt/.srt/…` → passthrough, skip Whisper) → transcript. Wraps `~/scripts/bin/{trans,transd}` (`trans_runner.py`). Args: `diarize`, `model`, `name`, `output_dir`, `include`, `timeout` — omitted ones fall back to settings.
+- **`meeting.status`** (tool) — engine reachability (trans/transd/mlx_whisper/yt-dlp) + settings readout with flip-instructions. Call first when transcription fails.
+- **`/meeting <input>`** (MCP *prompt*, surfaces as a slash command in Claude Desktop) — the orchestration: transcribe → host Claude extracts agreed action items → routes via gsuite (`calendar_create_event` dated · `tasks_create` undated). Honors the approval gate.
+- **Settings** — `~/.config/meeting/settings.json` (`MEETING_CONFIG_DIR` override): `diarize_default=false`, `approval_gate=true`, `default_model=small`, `output_dir`. install.sh writes a default; edit + see them via `meeting status`.
 
 ## Layout
 
