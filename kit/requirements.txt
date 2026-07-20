@@ -1,0 +1,11 @@
+# meeting kit — transcription engine deps (the `trans` light path).
+# Installed into ~/.venvs/diarize/  (the dir meeting's trans_runner adds to PATH
+# so `command -v mlx_whisper` resolves).  APPLE SILICON ONLY — mlx has no Intel build.
+# Verified working: macOS 26.x / Python 3.13 / M-series.
+#
+# ffmpeg + yt-dlp are NOT here — Homebrew provides them (brew install ffmpeg yt-dlp),
+# landing in /opt/homebrew/bin which the runner already searches.
+
+mlx-whisper==0.4.3
+mlx==0.31.2
+# (mlx-metal, numpy, numba, huggingface_hub resolve as deps of mlx-whisper)

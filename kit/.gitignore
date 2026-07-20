@@ -1,0 +1,4 @@
+# Build output — regenerate with build_kit.sh. The bundle ships as a RELEASE ASSET,
+# never committed (keeps the vendored OAuth client out of the repo tree).
+vendor/
+*.zip

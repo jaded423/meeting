@@ -9,6 +9,40 @@ related: [index]
 
 Append-only. Newest on top. Written by `/log`.
 
+## 2026-07-17 — [MAJOR] Fresh-Mac install kit built + published, then PAUSED
+
+**What changed:**
+- Built a self-contained **install kit** at `kit/`: `install.command` (zero→hero wizard —
+  Command Line Tools → Homebrew → **Claude Desktop** → ffmpeg/yt-dlp → mlx-whisper venv →
+  trans scripts → gsuite+meeting → Claude-Desktop registration → OAuth → **self-test**),
+  `check_prereqs.command`, `register_desktop.py` (writes `claude_desktop_config.json`),
+  `requirements.txt` (mlx-whisper pinned), `SETUP_MAC.md`, `build_kit.sh` (vendors
+  meeting+gsuite+trans+oauth-client into `kit/vendor/`), `sample-meeting.txt` (a
+  discrimination-test transcript: 2 dated events, 4 tasks, deliberate noise). `kit/.gitignore`
+  keeps `vendor/` + `*.zip` out of the repo. Self-contained — installs from bundled copies,
+  pulls nothing from git.
+- Set up a reusable isolated test gsuite instance **`gsuite-brown`** (`~/.config/gsuite-brown`,
+  authed to brown.joshua.david@gmail.com). See brain `gsuite-brown-test-instance`.
+- **READMEs made public-facing** — broke gsuite's `README.md → CLAUDE.md` symlink (that's why
+  it read like an internal doc) and wrote real public READMEs for both `gsuite` + `meeting`.
+  NOT yet committed/pushed.
+- **Secret-audited** gsuite + meeting (tree + full history) — clean. Flipped both **public**.
+  Cut release `meeting-kit-v0.1.0` with `meeting-kit.zip`.
+
+**Why PAUSED (Joshua, 2026-07-17):**
+- The delivery reused the over-scoped **Elevated** OAuth client, which carries **restricted**
+  Gmail scopes → Google's CASA verification wall, and bundling it into a public release exposed
+  it (installed-app client → low-risk, but wrong). The verification/gatekeeping regime soured
+  the approach → Joshua paused all Google/Meta/Anthropic-touching work.
+
+**Open when resumed (detail in `TODO.md` ☀️ block):**
+1. **Pull the public release** — it contains the exposed OAuth client.
+2. **Build a lean calendar+tasks OAuth client** (sensitive, NOT restricted → no CASA wall,
+   Production-publishable) instead of the Elevated Gmail one. The real fix.
+3. **Reproducibility** — the zip was a one-off from local state; commit+push source, rebuild
+   from a fresh clone, replace the asset.
+- **The VM dry-run never ran** — the kit is untested on a fresh Mac.
+
 ## 2026-07-09 — [MAJOR] MCP core built (steps 4–5 of the baton plan)
 
 **What changed:**
