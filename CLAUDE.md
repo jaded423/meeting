@@ -16,8 +16,8 @@ Transcription MCP — packages the `trans` stack (audio/URL/file → transcript)
 
 Correct-minimal: `meeting` only does media→text; **gsuite** owns Calendar/Tasks routing, the **host Claude** owns extraction.
 
-- **`meeting.transcribe`** (tool) — audio/video file · yt-dlp URL · or text file (`.txt/.srt/…` → passthrough, skip Whisper) → transcript. Wraps `~/scripts/bin/{trans,transd}` (`trans_runner.py`). Args: `diarize`, `model`, `name`, `output_dir`, `include`, `timeout` — omitted ones fall back to settings.
-- **`meeting.status`** (tool) — engine reachability (trans/transd/mlx_whisper/yt-dlp) + settings readout with flip-instructions. Call first when transcription fails.
+- **`meeting_transcribe`** (tool) — audio/video file · yt-dlp URL · or text file (`.txt/.srt/…` → passthrough, skip Whisper) → transcript. Wraps `~/scripts/bin/{trans,transd}` (`trans_runner.py`). Args: `diarize`, `model`, `name`, `output_dir`, `include`, `timeout` — omitted ones fall back to settings.
+- **`meeting_status`** (tool) — engine reachability (trans/transd/mlx_whisper/yt-dlp) + settings readout with flip-instructions. Call first when transcription fails.
 - **`/meeting <input>`** (MCP *prompt*, surfaces as a slash command in Claude Desktop) — the orchestration: transcribe → host Claude extracts agreed action items → routes via gsuite (`calendar_create_event` dated · `tasks_create` undated). Honors the approval gate.
 - **Settings** — `~/.config/meeting/settings.json` (`MEETING_CONFIG_DIR` override): `diarize_default=false`, `approval_gate=true`, `default_model=small`, `output_dir`. install.sh writes a default; edit + see them via `meeting status`.
 

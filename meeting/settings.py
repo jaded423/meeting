@@ -2,7 +2,7 @@
 
 Lives at ~/.config/meeting/settings.json (override the dir with MEETING_CONFIG_DIR,
 mirroring gsuite's GSUITE_CONFIG_DIR). All keys are optional — missing file or
-missing key falls back to DEFAULTS. `meeting.status` reads these back with
+missing key falls back to DEFAULTS. `meeting_status` reads these back with
 flip-instructions so Cody can see and change them without reading code.
 """
 
@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# key -> (default, human note shown by `meeting.status`)
+# key -> (default, human note shown by `meeting_status`)
 DEFAULTS: dict[str, object] = {
     # Fast trans/small by default; true = transd/large-v3 speaker labels (~10x slower).
     "diarize_default": False,
@@ -65,12 +65,12 @@ def write_default_settings(force: bool = False) -> Path:
     return p
 
 
-# how-to-flip text, `.format(path=...)`-ed by meeting.status
+# how-to-flip text, `.format(path=...)`-ed by meeting_status
 FLIP_HELP: dict[str, str] = {
     "diarize_default": (
         "Speaker labels are OFF by default (fast trans/small engine). To make them ON by "
         'default (transd/large-v3 — labels who said what, ~10x slower), set '
-        '"diarize_default": true in {path}. Per-call override: pass diarize to meeting.transcribe.'
+        '"diarize_default": true in {path}. Per-call override: pass diarize to meeting_transcribe.'
     ),
     "approval_gate": (
         "Approval is REQUIRED before /meeting writes to Calendar/Tasks (it lists items and "

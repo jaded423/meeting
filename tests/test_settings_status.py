@@ -36,7 +36,7 @@ def test_malformed_settings_falls_back(tmp_path, monkeypatch):
 
 
 def test_status_registered_and_shape():
-    assert "meeting.status" in build_registry()
+    assert "meeting_status" in build_registry()
     out = status()
     assert out["ok"] is True
     assert set(out["engines"]) == {"trans", "transd", "mlx_whisper", "yt_dlp"}

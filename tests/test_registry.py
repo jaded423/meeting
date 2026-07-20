@@ -3,8 +3,8 @@ from meeting.tools import build_registry
 
 def test_transcribe_registered():
     reg = build_registry()
-    assert "meeting.transcribe" in reg
-    spec = reg["meeting.transcribe"]
+    assert "meeting_transcribe" in reg
+    spec = reg["meeting_transcribe"]
     assert spec.input_schema["required"] == ["input"]
     props = spec.input_schema["properties"]
     assert {"input", "diarize", "model", "name", "output_dir", "include"} <= set(props)
@@ -18,4 +18,4 @@ def test_no_duplicate_registration():
     import meeting.tools as t
 
     importlib.reload(t)  # would raise ValueError on duplicate if guard failed
-    assert "meeting.transcribe" in build_registry()
+    assert "meeting_transcribe" in build_registry()

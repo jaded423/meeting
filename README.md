@@ -55,8 +55,8 @@ once you approve — creates the events and tasks.
 
 | Tool | What it does |
 |---|---|
-| `meeting.transcribe` | audio/video file · URL · or a text transcript → clean transcript text + files. `diarize` switches to the speaker-labeled engine. |
-| `meeting.status` | checks the engine is reachable and shows current settings. Run it first if transcription fails. |
+| `meeting_transcribe` | audio/video file · URL · or a text transcript → clean transcript text + files. `diarize` switches to the speaker-labeled engine. |
+| `meeting_status` | checks the engine is reachable and shows current settings. Run it first if transcription fails. |
 | `/meeting <input>` | the full flow: transcribe → extract action items → create calendar events + tasks (via `gsuite`). |
 
 ## Requirements
@@ -76,7 +76,7 @@ calls are Google's, for the calendar and task writes you approve.
   (who-said-what) needs a HuggingFace token and model access — enable it per call with
   `diarize: true`.
 - **Settings** live in `~/.config/meeting/settings.json` (default engine, an approval gate,
-  output folder); see them with `meeting.status`.
+  output folder); see them with `meeting_status`.
 
 ## Development
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import meeting.trans_runner as tr
 from meeting.tools import build_registry
 
-HANDLER = build_registry()["meeting.transcribe"].handler
+HANDLER = build_registry()["meeting_transcribe"].handler
 
 
 def _fake_run(content="agreed action items", extra_ext=("srt",)):

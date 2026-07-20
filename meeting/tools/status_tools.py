@@ -1,4 +1,4 @@
-"""meeting.status — diagnostic + settings readout.
+"""meeting_status — diagnostic + settings readout.
 
 Lets Cody (or Joshua) self-check a broken install and see the current settings
 with flip-instructions, without shell access or reading code.
@@ -31,7 +31,7 @@ def _probe_script(name: str) -> dict[str, Any]:
 
 
 @tool(
-    name="meeting.status",
+    name="meeting_status",
     description=(
         "Diagnostic + settings readout for the meeting MCP. Reports whether the local trans "
         "stack (trans / transd / mlx_whisper / yt-dlp) is reachable, and the current settings "

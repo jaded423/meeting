@@ -9,6 +9,20 @@ related: [index]
 
 Append-only. Newest on top. Written by `/log`.
 
+## 2026-07-20 — [FIX] tool names dotted → underscored (Claude Desktop rejected them)
+
+**What changed:** renamed the two MCP tools `meeting.transcribe` → `meeting_transcribe` and
+`meeting.status` → `meeting_status` (+ every reference in prompt text, settings strings,
+tests, README, CLAUDE.md).
+
+**Why:** first real Claude **Desktop** test (fresh VM, `meeting-kit` v0.1.0) failed with
+`Unknown skill: meeting` + `tools.NN...name: String should match pattern ^[a-zA-Z0-9_-]{1,64}$`.
+The server started and answered `tools/list` fine (log: `tools=['meeting.status',
+'meeting.transcribe']`), but Desktop's frontend **rejects dotted tool names**, which poisoned
+the whole server registration and dropped the `/meeting` prompt too. The 2026-07-09 unit tests
+never caught it because they exercised the MCP protocol directly, not Desktop's validation.
+gsuite (underscored) was unaffected. 13 tests still pass. Rebuilt kit + release `v0.1.1`.
+
 ## 2026-07-17 — [MAJOR] Fresh-Mac install kit built + published, then PAUSED
 
 **What changed:**

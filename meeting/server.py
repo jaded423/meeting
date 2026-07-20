@@ -49,9 +49,9 @@ def _meeting_prompt_text(input_value: str) -> str:
         )
     return f"""You are running the /meeting workflow. Input: {inp}
 
-1. Call `meeting.transcribe` with input="{inp}". It accepts an audio/video file, a
+1. Call `meeting_transcribe` with input="{inp}". It accepts an audio/video file, a
    URL (YouTube / Loom / Fathom share), or an already-transcribed text file. If it
-   returns ok:false, stop and report the error (try `meeting.status` to diagnose).
+   returns ok:false, stop and report the error (try `meeting_status` to diagnose).
 2. Read the transcript. Extract the AGREED action items and any dated commitments.
    For each: the owner, the action, and a date/time if one was stated or clearly implied.
 3. Route each item using the gsuite MCP tools:

@@ -1,4 +1,4 @@
-"""meeting.transcribe — audio/URL/file → transcript, via the local trans stack."""
+"""meeting_transcribe — audio/URL/file → transcript, via the local trans stack."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ _SCHEMA: dict[str, Any] = {
 
 
 @tool(
-    name="meeting.transcribe",
+    name="meeting_transcribe",
     description=(
         "Transcribe a meeting/audio/video source (URL or local file) to text using the "
         "local trans stack (Whisper on Apple Silicon; free, offline). Returns clean "
