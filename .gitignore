@@ -8,3 +8,6 @@ credentials.json
 __pycache__/
 *.egg-info/
 *.pyc
+
+# build artifact — ships as a release asset, not tracked
+meeting-kit.zip
