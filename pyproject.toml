@@ -21,6 +21,8 @@ dev = [
 
 [project.scripts]
 meeting = "meeting.cli:main"
+meeting-assistant = "meeting.assistant.cli:main"
+meeting-assistant-gui = "meeting.assistant.gui.app:main"
 
 [tool.setuptools.packages.find]
 include = ["meeting*"]

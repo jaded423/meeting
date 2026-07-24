@@ -1,5 +1,9 @@
 """Handler tests — patch the subprocess so no real transcription runs. Assert the
 shape of what the handler returns, mirroring gsuite's MagicMock-the-service style.
+
+trans_runner streams the child's stdout via Popen (for live progress), so these
+fakes stand in for Popen: a proc whose .stdout is an iterable of lines, plus
+.wait()/.returncode. The .txt is written at launch time so the post-run read finds it.
 """
 
 from pathlib import Path
@@ -10,29 +14,43 @@ from meeting.tools import build_registry
 HANDLER = build_registry()["meeting_transcribe"].handler
 
 
-def _fake_run(content="agreed action items", extra_ext=("srt",)):
-    """Return a fake subprocess.run that writes <name>.txt (+ extras) into TRANS_DIR."""
+class _FakeProc:
+    def __init__(self, returncode=0, lines=()):
+        self.returncode = returncode
+        self.stdout = iter(lines)
 
-    def fake(cmd, env=None, cwd=None, capture_output=None, text=None, timeout=None):
-        out_dir = Path(env["TRANS_DIR"])
-        name = cmd[2]
-        (out_dir / f"{name}.txt").write_text(content, encoding="utf-8")
-        for ext in extra_ext:
-            (out_dir / f"{name}.{ext}").write_text(f"1\n00:00 --> 00:01\n{content}", encoding="utf-8")
+    def wait(self, timeout=None):
+        return self.returncode
 
-        class _P:
-            returncode = 0
-            stdout = ""
-            stderr = ""
+    def terminate(self):
+        pass
 
-        return _P()
+    def kill(self):
+        pass
 
-    return fake
+
+def _fake_popen(content="agreed action items", extra_ext=("srt",),
+                returncode=0, lines=(), record=None):
+    """Return a fake subprocess.Popen that writes <name>.txt (+ extras) into TRANS_DIR."""
+
+    def factory(cmd, env=None, **kw):
+        if record is not None:
+            record["cmd"] = cmd
+        if returncode == 0:
+            out_dir = Path(env["TRANS_DIR"])
+            name = cmd[-1]  # run_name is always the last arg (an arch prefix may lead)
+            (out_dir / f"{name}.txt").write_text(content, encoding="utf-8")
+            for ext in extra_ext:
+                (out_dir / f"{name}.{ext}").write_text(
+                    f"1\n00:00 --> 00:01\n{content}", encoding="utf-8")
+        return _FakeProc(returncode, lines)
+
+    return factory
 
 
 def test_transcribe_file_ok(tmp_path, monkeypatch):
     monkeypatch.setattr(tr, "_resolve_bin", lambda name: f"/fake/{name}")
-    monkeypatch.setattr(tr.subprocess, "run", _fake_run("agreed action items"))
+    monkeypatch.setattr(tr.subprocess, "Popen", _fake_popen("agreed action items"))
     f = tmp_path / "meeting.m4a"
     f.write_bytes(b"x")
 
@@ -48,21 +66,9 @@ def test_transcribe_file_ok(tmp_path, monkeypatch):
 
 def test_diarize_uses_transd(tmp_path, monkeypatch):
     seen = {}
-
-    def fake(cmd, env=None, **kw):
-        seen["cmd"] = cmd
-        out_dir = Path(env["TRANS_DIR"])
-        (out_dir / f"{cmd[2]}.txt").write_text("two speakers", encoding="utf-8")
-
-        class _P:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return _P()
-
     monkeypatch.setattr(tr, "_resolve_bin", lambda name: f"/fake/{name}")
-    monkeypatch.setattr(tr.subprocess, "run", fake)
+    monkeypatch.setattr(tr.subprocess, "Popen",
+                        _fake_popen("two speakers", extra_ext=(), record=seen))
     f = tmp_path / "call.wav"
     f.write_bytes(b"x")
 
@@ -71,7 +77,7 @@ def test_diarize_uses_transd(tmp_path, monkeypatch):
     assert res["ok"] is True
     assert res["engine"] == "transd"
     assert res["name"] == "call-diarized"
-    assert seen["cmd"][0].endswith("transd")
+    assert any(str(c).endswith("transd") for c in seen["cmd"])
 
 
 def test_missing_local_file_errors():
@@ -88,11 +94,11 @@ def test_blank_input_errors():
 
 
 def test_text_file_passthrough(tmp_path, monkeypatch):
-    # A .txt input must skip ASR entirely — no subprocess call at all.
+    # A .txt input must skip ASR entirely — no subprocess launch at all.
     def boom(*a, **k):
         raise AssertionError("subprocess should not run for a text file")
 
-    monkeypatch.setattr(tr.subprocess, "run", boom)
+    monkeypatch.setattr(tr.subprocess, "Popen", boom)
     f = tmp_path / "prior.txt"
     f.write_text("Cody agreed to review the deck.", encoding="utf-8")
 
@@ -114,40 +120,21 @@ def test_settings_default_drives_diarize(tmp_path, monkeypatch):
     monkeypatch.setenv("MEETING_CONFIG_DIR", str(cfg_dir))
 
     seen = {}
-
-    def fake(cmd, env=None, **kw):
-        seen["bin"] = cmd[0]
-        Path(env["TRANS_DIR"], f"{cmd[2]}.txt").write_text("x", encoding="utf-8")
-
-        class _P:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return _P()
-
     monkeypatch.setattr(tr, "_resolve_bin", lambda name: f"/fake/{name}")
-    monkeypatch.setattr(tr.subprocess, "run", fake)
+    monkeypatch.setattr(tr.subprocess, "Popen", _fake_popen("x", extra_ext=(), record=seen))
     f = tmp_path / "m.mp3"
     f.write_bytes(b"x")
 
     res = HANDLER(input=str(f), output_dir=str(tmp_path / "o"))
 
     assert res["engine"] == "transd"
-    assert seen["bin"].endswith("transd")
+    assert any(str(c).endswith("transd") for c in seen["cmd"])
 
 
 def test_subprocess_failure_is_retryable(tmp_path, monkeypatch):
-    def fail(cmd, env=None, **kw):
-        class _P:
-            returncode = 1
-            stdout = ""
-            stderr = "mlx_whisper: not found"
-
-        return _P()
-
     monkeypatch.setattr(tr, "_resolve_bin", lambda name: f"/fake/{name}")
-    monkeypatch.setattr(tr.subprocess, "run", fail)
+    monkeypatch.setattr(tr.subprocess, "Popen",
+                        _fake_popen(returncode=1, lines=["mlx_whisper: not found\n"]))
     f = tmp_path / "a.mp3"
     f.write_bytes(b"x")
 

@@ -38,9 +38,70 @@ _PATH_EXTRA = [
 ]
 _DEFAULT_TIMEOUT = 3600  # transcription is slow; a 28-min meeting ~= 13 min on large-v3
 
+# transd stage markers we surface as progress phases (see ~/scripts/bin/transd).
+_TD_PCT = re.compile(r"\[download\]\s+([\d.]+)%")
+_TD_CHUNK = re.compile(r"chunk (\d+)/(\d+)")
+# pyannote internal progress, emitted by transd when TRANS_PROGRESS=1:
+#   "  [diar] segmentation 12/34 (35%)"
+_TD_DIAR = re.compile(r"\[diar\]\s+(\w+)\s+\d+/\d+\s+\((\d+)%\)")
+
+def _detect_apple_silicon() -> bool:
+    """True on Apple Silicon hardware — even when the caller runs under Rosetta.
+
+    Computed once at import (before any test mocks `subprocess.Popen`); `sysctl`
+    reports the real hardware, unlike `platform.machine()` which lies under Rosetta.
+    """
+    try:
+        out = subprocess.run(["sysctl", "-n", "hw.optional.arm64"],
+                             capture_output=True, text=True, timeout=3)
+        return out.stdout.strip() == "1"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+_ARM64_HW = _detect_apple_silicon()
+
+
+def _arm64_prefix() -> list[str]:
+    """`['arch','-arm64']` on Apple Silicon so MLX / pyannote run native.
+
+    MLX is arm64-only: if this process happens to run under x86_64 (a Rosetta
+    terminal, or an app bundle launched x86_64), a child mlx_whisper inherits x86_64
+    and dies with `incompatible architecture … need 'x86_64'`. Forcing the child to
+    arm64 makes transcription work regardless of the parent's architecture.
+    """
+    return ["arch", "-arm64"] if _ARM64_HW else []
+
 
 class TransError(RuntimeError):
     """The trans/transd subprocess could not run or produced no transcript."""
+
+
+def _emit_transd_progress(line: str, on_progress) -> None:
+    """Map a transd stdout line to an on_progress(phase, fraction) call."""
+    m = _TD_DIAR.search(line)  # real pyannote progress (segmentation / embeddings)
+    if m:
+        on_progress(f"Diarizing ({m.group(1)})", int(m.group(2)) / 100.0)
+        return
+    m = _TD_PCT.search(line)
+    if m:
+        try:
+            on_progress("Downloading audio", float(m.group(1)) / 100.0)
+        except ValueError:
+            pass
+        return
+    m = _TD_CHUNK.search(line)
+    if m:
+        i, n = int(m.group(1)), int(m.group(2))
+        on_progress(f"Transcribing turn {i}/{n}", (i / n) if n else None)
+        return
+    low = line.lower()
+    if "[1/3]" in line or "downloading audio" in low:
+        on_progress("Downloading audio", None)
+    elif "diariz" in low and "chunk" not in low:
+        on_progress("Diarizing speakers", None)
+    elif "[3/3]" in line or "writing" in low and "format" in low:
+        on_progress("Writing transcript", None)
 
 
 def _resolve_bin(name: str) -> str:
@@ -84,10 +145,16 @@ def run(
     model: str | None = None,
     output_dir: str | None = None,
     timeout: int | None = None,
+    on_progress=None,
+    stop_event=None,
 ) -> dict[str, Any]:
     """Run trans/transd on `input_str`; return {engine, name, output_dir, text, files}.
 
     Raises TransError if the binary is missing, times out, or writes no .txt.
+
+    `on_progress(phase, fraction)` (optional) is called as transd streams its
+    stages; `stop_event` (anything with `.is_set()`) terminates the run when set.
+    Both default to None → original blocking behavior (the MCP path is unaffected).
     """
     # Already-text input (a prior transcript / meeting note) — no ASR, just read it
     # through so Cody can bootstrap a previously-trans'd meeting into the flow.
@@ -111,24 +178,44 @@ def run(
     env["TRANS_DIR"] = str(out_dir)
     if model:
         env["TRANS_MODEL"] = model
+    if on_progress is not None:  # ask transd to emit pyannote's internal progress
+        env["TRANS_PROGRESS"] = "1"
 
+    # Stream stdout so we can forward transd's stage/turn progress and honor Cancel.
     try:
-        proc = subprocess.run(
-            [binary, input_str, run_name],
+        proc = subprocess.Popen(
+            [*_arm64_prefix(), binary, input_str, run_name],
             env=env,
             cwd=str(out_dir),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout or _DEFAULT_TIMEOUT,
+            bufsize=1,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise TransError(f"{bin_name} timed out after {exc.timeout:.0f}s") from exc
     except OSError as exc:
         raise TransError(f"failed to launch {bin_name}: {exc}") from exc
 
+    lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        lines.append(line)
+        if stop_event is not None and stop_event.is_set():
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise TransError(f"{bin_name} cancelled by user")
+        if on_progress:
+            try:
+                _emit_transd_progress(line, on_progress)
+            except Exception:  # noqa: BLE001 — progress must never crash the run
+                pass
+    proc.wait()
+
     txt_path = out_dir / f"{run_name}.txt"
     if proc.returncode != 0 or not txt_path.is_file():
-        tail = (proc.stderr or proc.stdout or "").strip()[-800:]
+        tail = "".join(lines).strip()[-800:]
         raise TransError(
             f"{bin_name} failed (exit {proc.returncode}); no transcript at "
             f"{txt_path}. Output tail:\n{tail}"

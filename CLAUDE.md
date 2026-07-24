@@ -4,13 +4,28 @@
 
 ## Purpose
 
-Transcription MCP — packages the `trans` stack (audio/URL/file → transcript) as Claude-usable tools; Cody's Claude handles extraction → Google Calendar/Tasks routing.
+Turn a meeting recording (audio/URL/pasted text) into Google Calendar events + Tasks. Local
+Whisper transcribes; a headless `claude -p` brain extracts action items; you review/edit them
+(with per-person invite chips) before anything is created.
 
-## Status
+## Status — the STANDALONE APP is the product (pivoted 2026-07-20)
 
-**Core BUILT 2026-07-09** (mcp session; steps 4–5 of the baton plan). Server package in `meeting/`; 13 tests pass; transcribe + text-passthrough + status all verified on real input. **Remaining = step 6** (register in `mcp` `install-all.sh` `REPOS=` + distribute to Cody + global routing-map register — that last is T0's step 7). Open Qs for Cody: Mac specs + Plaud-device-vs-file input.
+**`meeting/assistant/` is the real deliverable**, not the MCP. A native Tk GUI drives local
+transcription (progress + ETA) → structured proposal → an editable review panel → create via
+gsuite. **Built + hardened through live testing 2026-07-23** (both fast + diarized paths reach
+the review→create flow; 13 tests pass). Run: `python -m meeting.assistant.gui`, or double-click
+the gitignored dev `MeetingAssistant.app`. **Must run arm64** (MLX is arm64-only — forced via
+`arch -arm64`; the eventual PyInstaller `.app` must be built under arm64 Python). Design + the
+testing gotchas: [docs/meeting-assistant-design.md](docs/meeting-assistant-design.md).
 
-**Design doc (the what/why/how, engine bench, routing, human-in-loop):** [`~/projects/trans/docs/meeting-to-tasks-pipeline.md`](~/projects/trans/docs/meeting-to-tasks-pipeline.md). Delivery = 2 MCPs on Cody's Claude Desktop (`meeting` transcribes + `gsuite` routes to Calendar/Tasks); Cody's Claude = the extraction brain. Peer of `gsuite`/`leadscout` under the `mcp` hub; uses `trans`, not org-coupled to it. Baton plan: [`~/.claude/plans/meeting-mcp-build.md`](~/.claude/plans/meeting-mcp-build.md).
+Remaining: Joshua shakeout on a live calendar → Cody VM timed run → PyInstaller packaging (see
+[TODO.md](TODO.md)). Contacts roster (name→email for invites) is editable in-app or at
+`~/.config/meeting-assistant/contacts.json`.
+
+**The `meeting` MCP (below) is now OFF the critical path** — nothing in the app calls it; only
+`trans_runner.py` is reused. Kept as an optional "transcribe from a chat" convenience.
+Historical design/pivot: [docs/meeting-assistant-design.md](docs/meeting-assistant-design.md);
+older MCP-build baton plan: [`~/.claude/plans/meeting-mcp-build.md`](~/.claude/plans/meeting-mcp-build.md).
 
 ## Surface (what it exposes)
 
