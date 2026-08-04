@@ -42,6 +42,38 @@ Correct-minimal: `meeting` only does media→text; **gsuite** owns Calendar/Task
 - `docs/changelog.md` — append-only history (`/log` writes here).
 - `TODO.md` — open tasks + the session handoff (keep priority-ordered; first open item = what's next).
 
+## Gotcha — account binding is structural, don't "simplify" it away
+
+Every `claude -p` call that touches Google **must** go through `brain._bind()`, which appends
+`--mcp-config <one-server file> --strict-mcp-config`. That is the ONLY thing pinning a run to
+the selected account.
+
+`--allowedTools mcp__gsuite-<acct>__*` looks like it does this. It does not — it is a
+*permission* allowlist, and every brain call runs `--dangerously-skip-permissions`, which
+bypasses permission checks. With four `gsuite-*` servers registered, the model sees four
+identical `calendar_create_event` tools and picks freely, per call. Cost a real wrong-calendar
+incident on 2026-07-27 (details: [changelog](docs/changelog.md); cross-repo fact: brain
+`claude-p-mcp-account-binding`). The `--allowedTools` lines are kept as documentation of
+intent only. An unregistered server raises `AccountBindingError` and the call returns
+`ok=False` **without running** — deliberate: a run that can't prove its destination must not write.
+
+## Gotcha — a launched app gets launchd's environment, not your shell's
+
+Double-click **and `open`** both go through LaunchServices, so the app inherits
+`PATH=/usr/bin:/bin:/usr/sbin:/sbin` and **none** of `~/.zshrc.local`'s exports. Anything the
+code expects from a shell is absent in the configuration users actually run.
+
+- `trans_runner.ensure_path()` (called at the top of `gui/app.py:main()`) repairs `PATH` from
+  `_PATH_EXTRA` — otherwise `claude` (`~/.local/bin`) and `ffprobe` are invisible.
+- `trans_runner.hf_token()` reads the gated-model token from `~/.secrets/hf_token`, falling
+  back to `~/.cache/huggingface/token`; `HF_TOKEN` in the env still wins. Diarization needs it
+  (pyannote models are gated) and fails a pre-flight with an actionable message when absent.
+
+**Before adding any new environment dependency, test it this way** — it is the only launch
+mode that matters: `env -i HOME=$HOME USER=$USER PATH=/usr/bin:/bin python -m meeting.assistant.gui`.
+Keep `USER` — the Claude CLI's keychain lookup keys on it, and dropping it produces a
+*false* "not signed in". Cross-repo fact: brain `launchd-env-vs-shell-env`.
+
 ## Conventions
 
 Keep THIS file lean + current-operational; cold content (history, design, build logs) → a typed `docs/*.md` this file points at. Memory homes + the one-home rule: [memory-architecture](~/.claude/docs/memory-architecture.md). This project's routing-map line lives in the global [CLAUDE.md](~/.claude/CLAUDE.md) "Active Projects" under **AI / Claude tooling**.

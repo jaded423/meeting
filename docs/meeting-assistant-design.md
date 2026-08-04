@@ -151,13 +151,45 @@ Both the fast-Whisper and diarized paths reach the review→create flow. Run:
 - **Google Tasks can't carry guests** → any item involving another person is created as an
   Event so it can invite them (undated → all-day). Only your-own+undated stays a Task.
 
+## Completeness safety net (built 2026-07-24)
+
+The app's real failure mode isn't a wrong item — it's a **silently dropped** one. For a meeting
+you attended you'd notice; for one you didn't, the proposal *looks* complete no matter what it
+omitted. Three independent nets, because each catches a different miss:
+
+| Net | Catches | Where |
+|---|---|---|
+| `brain.audit_coverage()` | the drop itself | a 2nd `claude -p`, read-only |
+| topic ledger in the review panel | drops the 2nd pass also missed | `gui/app.py::_build_coverage` |
+| `brain.email_transcript()` | everything, when both passes are wrong | review footer |
+
+**Why a second pass and not a better first prompt:** the first pass is asked to be *selective*
+(agreed items only, not every topic). Selectivity and completeness pull opposite ways in one
+prompt. Splitting them lets the critic be told the opposite thing — *assume something was
+dropped, break ties toward "missed"* — because a false alarm costs one glance in a review panel
+you're already reading, while a miss costs a deliverable. Candidates therefore arrive
+**unchecked**: opt-in, never opt-out.
+
+**The ledger is the part that generalises.** Items alone can't be audited — you can't see what
+isn't there. `9 topics → 4 items` is a question you can ask; `4 items` isn't.
+
+**Design constraints worth not re-deriving:**
+- **The transcript is mailed by PATH, never through a model's context.** `gmail_send_message`
+  takes local-file attachments, so the mailer call carries a path string; `Read` is disallowed
+  on it so it can't open what it's attaching. A 2h transcript would otherwise cost more to mail
+  than to transcribe, and could come out paraphrased. A test locks this in.
+- **The audit never raises.** Bad JSON, non-zero exit, timeout, launch failure → empty ledger.
+  A broken second pass must never cost you the items the first pass did find.
+- **Unknown topic status → `missed`.** Fail toward the human.
+- **The audit email records skipped rows too** — what you *declined* to create is exactly what
+  Calendar can't tell you six weeks later.
+
 ## What's left (see TODO.md)
 
 - **Shakeout runs by Joshua** — confirm the review→`Create` flow lands events/tasks + invites
-  on a live calendar; both paths; then a Cody-settings timed run on the VM.
-- **Completeness safety net** — for meetings Joshua wasn't in, catch items the brain missed:
-  email the diarized transcript to a configurable address (quick win) and/or a second-pass
-  "did we miss anything?" critic. See TODO.
+  on a live calendar; both paths; then a Cody-settings timed run on the VM. Now also covers the
+  safety net's first live run — above all, replay the meeting whose "four-pillars" deliverable
+  was dropped, since it's the one case with ground truth.
 - **Package for the VM/Cody** — PyInstaller `.app` (arm64); the old kit installed *Claude
   Desktop* + the *meeting MCP* and is superseded by this app + `claude` CLI + gsuite-on-CLI.
 - **Demote the `meeting` MCP in the docs** so future sessions don't assume it's central.

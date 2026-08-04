@@ -15,3 +15,6 @@ meeting-kit.zip
 # dev double-click launcher (local paths; real ship is the PyInstaller .app)
 MeetingAssistant.app/
 .claude/
+
+# stray local copy — the ONE home is ~/.secrets/hf_token (never track)
+hf_token

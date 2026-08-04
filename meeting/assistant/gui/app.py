@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,8 +34,9 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 if getattr(sys, "frozen", False):  # PyInstaller bundle
     sys.path.insert(0, sys._MEIPASS)  # type: ignore[attr-defined]
 
-from .. import contacts, transcribe  # noqa: E402
-from .worker import CreateWorker, TranscribeWorker  # noqa: E402
+from ... import trans_runner  # noqa: E402
+from .. import brain, contacts, transcribe  # noqa: E402
+from .worker import CreateWorker, EmailWorker, TranscribeWorker  # noqa: E402
 
 # --- logging: a --windowed .app has no console, so this is the only debug channel
 _LOG_DIR = Path.home() / "Library" / "Logs" / "MeetingAssistant"
@@ -64,6 +66,55 @@ MODELS = [
 DEFAULT_OUT = Path.home() / "projects" / "trans" / "transcriptions"
 PAD = 14
 
+# Time-of-day picker for an event row. A dated commitment usually arrives with no
+# stated time, and an all-day event renders as a 24-hour busy bar most people
+# scroll past — so a real morning slot is the default and "All day" is an explicit
+# choice. Half-hour slots across a working day cover everything a meeting produces.
+ALL_DAY = "All day"
+DEFAULT_TIME = "9:00 AM"
+TIMES = [ALL_DAY] + [
+    f"{h % 12 or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+    for h in range(7, 19)
+    for m in (0, 30)
+]
+
+
+def _split_when(value: str) -> tuple[str, str]:
+    """A model-supplied "date" -> (YYYY-MM-DD, picker label).
+
+    No time in the string means the model didn't hear one — that's the 9:00 AM
+    default, not an all-day event.
+    """
+    value = (value or "").strip()
+    if not value:
+        return "", DEFAULT_TIME
+    parts = value.replace("T", " ").split()
+    day = parts[0]
+    if len(parts) < 2:
+        return day, DEFAULT_TIME
+    try:
+        label = datetime.strptime(parts[1][:5], "%H:%M").strftime("%-I:%M %p")
+    except ValueError:
+        return day, DEFAULT_TIME
+    return day, label if label in TIMES else DEFAULT_TIME
+
+
+def _join_when(day: str, label: str) -> str | None:
+    """(date, picker label) -> what gsuite's `start` wants, or None if undated.
+
+    `YYYY-MM-DD` is an all-day event to `calendar_create_event`; `YYYY-MM-DD HH:MM`
+    is a timed one. Neither needs a timezone — the tool stamps the calendar's own.
+    """
+    day = (day or "").strip()
+    if not day:
+        return None
+    if label == ALL_DAY:
+        return day
+    try:
+        return f"{day} {datetime.strptime(label, '%I:%M %p').strftime('%H:%M')}"
+    except ValueError:
+        return day
+
 
 def _dark_mode() -> bool:
     try:
@@ -81,6 +132,9 @@ FAINT = "#7A808B" if _DARK else "#9AA0AC"   # tertiary / placeholders
 OK = "#2BBB90" if _DARK else "#0E8C6B"      # "nothing sent" / done
 WARN = "#E0A552" if _DARK else "#A9660C"    # ambiguity / no-email
 CHIP = "#C9CDD4" if _DARK else "#333333"    # known-email guest chip
+
+# coverage-ledger status glyphs (topic was captured / needed nothing / was dropped)
+GLYPH = {"covered": "✓", "no-action": "·", "missed": "⚠"}
 
 
 def _fmt(sec: float | None) -> str:
@@ -117,6 +171,7 @@ class App:
         self.mode = tk.StringVar(value="file")       # file | url | text
         self.model = tk.StringVar(value="medium")    # whisper model
         self.diarize = tk.BooleanVar(value=True)
+        self.audit = tk.BooleanVar(value=True)       # second-pass completeness check
         self.account = tk.StringVar(value=contacts.accounts()[0])
         self.input_var = tk.StringVar()
         self.meeting_date = tk.StringVar(value=date.today().isoformat())
@@ -126,6 +181,12 @@ class App:
         # review state
         self.transcript = ""
         self.rows: list[dict] = []
+        self.coverage: dict = {"topics": [], "missed": []}
+        # Opt-out, not opt-in: the audit email is the only artifact that survives a
+        # wrong extraction — it carries the transcript AND the skipped rows, which
+        # Calendar can never tell you about. So the safe state is the default state.
+        self.email_on_create = tk.BooleanVar(value=True)
+        self.email_to = tk.StringVar(value="")
 
         self._build_header()
         self.body = ttk.Frame(root, padding=PAD)
@@ -192,6 +253,10 @@ class App:
         ttk.Checkbutton(dwrap, text="Label who said what",
                         variable=self.diarize).pack(anchor="w")
         ttk.Label(dwrap, text="needed to route items per person",
+                  foreground=MUTED).pack(anchor="w")
+        ttk.Checkbutton(dwrap, text="Double-check for missed items",
+                        variable=self.audit).pack(anchor="w", pady=(8, 0))
+        ttk.Label(dwrap, text="second pass — costs ~1 min, catches drops",
                   foreground=MUTED).pack(anchor="w")
 
         awrap = ttk.Frame(controls)
@@ -309,14 +374,17 @@ class App:
             "out_dir": str(DEFAULT_OUT),
             "model": self.model.get(),
             "diarize": bool(self.diarize.get()),
+            "audit": bool(self.audit.get()),
             "account": self.account.get(),
             "meeting_date": self.meeting_date.get().strip(),
         }
         self._phase_label = None  # reset ETA phase tracking for this run
+        self._run_name = params["name"]
         self._is_url = "://" in resolved
         self._is_text = (not self._is_url) and Path(resolved).suffix.lower() in {
             ".txt", ".md", ".srt", ".vtt", ".tsv"}
         self._run_diarize = bool(self.diarize.get())
+        self._run_audit = bool(self.audit.get())
         self._steps = self._compute_steps()
         log.info("start: %s (steps=%s)", {k: v for k, v in params.items() if k != "input"}, self._steps)
         self.worker = TranscribeWorker(params, self.queue)
@@ -393,6 +461,8 @@ class App:
             else:
                 steps.append("transcribe")
         steps.append("analyze")
+        if getattr(self, "_run_audit", False):
+            steps.append("audit")
         return steps
 
     @staticmethod
@@ -405,6 +475,8 @@ class App:
             return "diar-seg"
         if phase.startswith("Transcribing"):
             return "transcribe"
+        if phase.startswith("Double-checking"):
+            return "audit"
         if phase.startswith(("Reading", "Analyzing")):
             return "analyze"
         return None
@@ -416,11 +488,16 @@ class App:
             self.prog_step.config(text=f"STEP {steps.index(key) + 1} OF {len(steps)}")
 
     # ---------------------------------------------------------------- review
-    def show_review(self, items: list[dict], transcript: str, meta: dict) -> None:
+    def show_review(self, items: list[dict], transcript: str, meta: dict,
+                    coverage: dict | None = None) -> None:
         self.transcript = transcript
+        self.coverage = coverage or {"topics": [], "missed": []}
+        self._meta = meta
         self._clear_body()
         self.rows = []
         account = self.account.get()
+        if not self.email_to.get():
+            self.email_to.set(contacts.me(account).get("email", ""))
 
         recap = ttk.Frame(self.body)
         recap.pack(fill="x", pady=(0, 8))
@@ -428,6 +505,12 @@ class App:
                                f" · {_fmt(meta.get('seconds'))}"),
                   foreground=MUTED).pack(side="left")
         ttk.Label(recap, text="  ● Nothing sent yet", foreground=OK).pack(side="right")
+
+        # Second-pass candidates ride in the same list as the first pass, but always
+        # unchecked and tagged — you opt them IN, you never have to spot them.
+        flagged = [dict(m, _flagged=True) for m in (self.coverage.get("missed") or [])]
+        merged = [dict(it, _flagged=False) for it in items] + flagged
+        self._build_coverage(len(merged))
 
         ttk.Label(self.body,
                   text="Edit anything, uncheck to skip, add or remove guests before you create them:",
@@ -448,19 +531,84 @@ class App:
         canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 3)), "units"))
 
         me_name = contacts.me(account).get("name", "")
-        for item in items:
+        for item in merged:
             self._build_row(inner, item, account, me_name)
 
         # footer
         ttk.Separator(self.body, orient="horizontal").pack(fill="x", pady=12)
+
+        mail = ttk.Frame(self.body)
+        mail.pack(fill="x", pady=(0, 8))
+        # One send path only. This rides along with the Create action below rather
+        # than getting its own button — a separate "send now" meant pressing both
+        # mailed the same report twice.
+        ttk.Checkbutton(mail, text="Email transcript + this report to",
+                        variable=self.email_on_create,
+                        command=self._refresh_count).pack(side="left")
+        ttk.Entry(mail, textvariable=self.email_to, width=32).pack(side="left", padx=6)
+        self.mail_status = ttk.Label(
+            mail, text="sent once, with the items below", foreground=MUTED)
+        self.mail_status.pack(side="left", padx=8)
+
         foot = ttk.Frame(self.body)
         foot.pack(fill="x")
         self.count_lbl = ttk.Label(foot, text="", foreground=MUTED)
         self.count_lbl.pack(side="left")
-        ttk.Button(foot, text="Create selected →", command=self._create).pack(side="right")
+        self.create_btn = ttk.Button(foot, text="Create selected →", command=self._create)
+        self.create_btn.pack(side="right")
         ttk.Button(foot, text="Export transcript", command=self._export).pack(side="right", padx=8)
         ttk.Button(foot, text="← Start over", command=self.show_setup).pack(side="left", padx=12)
         self._refresh_count()
+
+    def _build_coverage(self, n_items: int) -> None:
+        """The 'did we get everything?' header — topic ledger from the second pass.
+
+        The point is to make under-inclusion VISIBLE: "9 topics → 4 items" is a
+        question worth asking, and you cannot ask it if all you ever see is the
+        4 items the brain chose to show you.
+        """
+        topics = self.coverage.get("topics") or []
+        if not topics:
+            return
+        n_missed = sum(1 for t in topics if t.get("status") == "missed")
+        speakers = len(set(re.findall(r"\[SPEAKER_\d+\]", self.transcript)))
+
+        bar = ttk.Frame(self.body)
+        bar.pack(fill="x", pady=(0, 6))
+        bits = [f"{len(topics)} topics", f"{n_items} items"]
+        if speakers:
+            bits.insert(0, f"{speakers} speakers")
+        ttk.Label(bar, text="COVERAGE", foreground=MUTED).pack(side="left", padx=(0, 8))
+        ttk.Label(bar, text=" · ".join(bits)).pack(side="left")
+        if n_missed:
+            ttk.Label(bar, text=f"  ⚠ {n_missed} the first pass missed",
+                      foreground=WARN).pack(side="left")
+
+        self._topics_frame = ttk.Frame(self.body)
+        self._topics_shown = False
+        toggle = ttk.Button(bar, text="Show topics ▾")
+
+        def _toggle() -> None:
+            self._topics_shown = not self._topics_shown
+            if self._topics_shown:
+                self._topics_frame.pack(fill="x", pady=(0, 8), before=self._topics_anchor)
+                toggle.config(text="Hide topics ▴")
+            else:
+                self._topics_frame.pack_forget()
+                toggle.config(text="Show topics ▾")
+
+        toggle.config(command=_toggle)
+        toggle.pack(side="right")
+        self._topics_anchor = ttk.Frame(self.body)  # keeps the list above the rows
+        self._topics_anchor.pack(fill="x")
+
+        for t in topics:
+            status = t.get("status", "no-action")
+            note = f" — {t['note']}" if t.get("note") else ""
+            fg = WARN if status == "missed" else (MUTED if status == "no-action" else CHIP)
+            ttk.Label(self._topics_frame,
+                      text=f"  {GLYPH.get(status, '·')} {t.get('topic', '')}{note}",
+                      foreground=fg).pack(anchor="w")
 
     def _build_row(self, parent, item: dict, account: str, me_name: str) -> None:
         owner = str(item.get("owner", "") or "unassigned")
@@ -476,7 +624,9 @@ class App:
         top = ttk.Frame(row)
         top.pack(fill="x")
 
-        include = tk.BooleanVar(value=not bool(item.get("ambiguous")))
+        flagged = bool(item.get("_flagged"))
+        # a second-pass candidate is a suggestion, not a finding — never pre-checked
+        include = tk.BooleanVar(value=not flagged and not bool(item.get("ambiguous")))
         ttk.Checkbutton(top, variable=include, command=self._refresh_count).pack(side="left")
 
         owner_lbl = owner + ("  · you" if owner.lower() == me_name.lower() and me_name else "")
@@ -485,10 +635,17 @@ class App:
         action_var = tk.StringVar(value=str(item.get("action", "")))
         ttk.Entry(top, textvariable=action_var).pack(side="left", fill="x", expand=True)
 
-        date_var = tk.StringVar(value=str(item.get("date") or ""))
-        ttk.Entry(top, textvariable=date_var, width=17).pack(side="left", padx=6)
+        day, time_label = _split_when(str(item.get("date") or ""))
+        date_var = tk.StringVar(value=day)
+        date_entry = ttk.Entry(top, textvariable=date_var, width=11)
+        date_entry.pack(side="left", padx=(6, 3))
 
-        type_var = tk.StringVar(value=str(item.get("type", "task")))
+        time_var = tk.StringVar(value=time_label)
+        time_cb = ttk.Combobox(top, textvariable=time_var, values=TIMES,
+                               state="readonly", width=9)
+        time_cb.pack(side="left", padx=(0, 6))
+
+        type_var = tk.StringVar(value=str(item.get("type", "event")))
         ttk.Combobox(top, textvariable=type_var, values=["event", "task"],
                      state="readonly", width=7).pack(side="left")
 
@@ -497,12 +654,25 @@ class App:
 
         record = {
             "include": include, "action": action_var, "date": date_var,
-            "type": type_var, "invitees": invitees, "inv_frame": inv_frame,
-            "ambiguous": item.get("ambiguous"),
+            "time": time_var, "type": type_var, "invitees": invitees,
+            "inv_frame": inv_frame, "ambiguous": item.get("ambiguous"),
+            "owner": owner, "flagged": flagged,
+            "date_entry": date_entry, "time_cb": time_cb,
         }
         self.rows.append(record)
         self._render_invitees(record)
 
+        # An event with no date is impossible to create (Calendar needs a start),
+        # so re-validate live as either field is edited. The time picker only
+        # applies to events — Tasks honour the date and ignore any time — so it
+        # greys out rather than lying about what will happen.
+        date_var.trace_add("write", lambda *_: self._refresh_count())
+        type_var.trace_add("write", lambda *_: self._sync_time_state(record))
+        self._sync_time_state(record)
+
+        if flagged:
+            ttk.Label(row, text="⊕ 2nd pass — the first read dropped this; check it to include",
+                      foreground=WARN).pack(anchor="w", padx=(28, 0))
         if item.get("ambiguous"):
             ttk.Label(row, text=f"⚠ {item['ambiguous']}", foreground=WARN).pack(anchor="w", padx=(28, 0))
 
@@ -538,13 +708,68 @@ class App:
         record["invitees"] = [i for i in record["invitees"] if i is not inv]
         self._render_invitees(record)
 
+    def _sync_time_state(self, record: dict) -> None:
+        """Grey the time picker out on a Task — Tasks store a date, never a time."""
+        try:
+            record["time_cb"].config(
+                state="readonly" if record["type"].get() == "event" else "disabled")
+        except (tk.TclError, KeyError):
+            pass
+        self._refresh_count()
+
+    @staticmethod
+    def _row_problem(record: dict) -> str:
+        """Why this row can't be created as configured, or '' if it's fine.
+
+        A dateless Event is the one combination Calendar still cannot accept —
+        `calendar_create_event` needs a `start`, so the router would be left
+        inventing a date (and emailing it to real guests) or stopping to ask.
+        Since events are now the default, this is mostly a prompt to supply the
+        date that turns a task into something people actually get invited to.
+        """
+        if record["type"].get() == "event" and not record["date"].get().strip():
+            return "an event with no date"
+        return ""
+
     def _refresh_count(self) -> None:
         if not hasattr(self, "count_lbl"):
             return
         sel = [r for r in self.rows if r["include"].get()]
         ev = sum(1 for r in sel if r["type"].get() == "event")
         tk_ = len(sel) - ev
-        self.count_lbl.config(text=f"{len(sel)} of {len(self.rows)} selected — {ev} events, {tk_} tasks")
+
+        bad = [r for r in sel if self._row_problem(r)]
+        for r in self.rows:
+            try:  # flag the offending field itself, not just the footer
+                r["date_entry"].config(
+                    foreground=WARN if (r["include"].get() and self._row_problem(r)) else "")
+            except tk.TclError:
+                pass
+
+        emailing = bool(self.email_on_create.get())
+        if bad:
+            noun = "is an event with no date" if len(bad) == 1 else "are events with no date"
+            self.count_lbl.config(
+                text=f"⚠ {len(bad)} of {len(sel)} selected {noun} — add a date, or switch to Task",
+                foreground=WARN)
+        else:
+            self.count_lbl.config(
+                text=f"{len(sel)} of {len(self.rows)} selected — {ev} events, {tk_} tasks",
+                foreground=MUTED)
+
+        if not hasattr(self, "create_btn"):
+            return
+        if bad:
+            label, state = "Create selected →", "disabled"
+        elif sel:
+            label = f"Create {len(sel)} + email →" if emailing else f"Create {len(sel)} →"
+            state = "normal"
+        elif emailing:
+            # nothing to create, but the transcript is still worth banking
+            label, state = "Email transcript only →", "normal"
+        else:
+            label, state = "Nothing selected", "disabled"
+        self.create_btn.config(text=label, state=state)
 
     def _gather_items(self) -> list[dict]:
         items = []
@@ -557,29 +782,125 @@ class App:
             emails = [i["email"] for i in r["invitees"] if i["email"]]
             unknown = [i["name"] for i in r["invitees"] if not i["email"]]
             typ = r["type"].get()
-            if typ == "event" and unknown:  # no email → keep the name in the title
+            notes = ""
+            if typ == "task":
+                # Tasks carry no guest list at all, so the names have to survive
+                # somewhere or the person is silently lost. `notes` is that place —
+                # folding them into the title produced live tasks reading
+                # "…4 business (w/ jaded423@gmail.com)", because a typed address
+                # IS its own display name.
+                named = [i["name"] for i in r["invitees"]]
+                if named:
+                    notes = "With: " + ", ".join(named)
+                emails = []
+            elif unknown:  # event, but no address to invite → keep the name visible
                 action = f"{action} (w/ {', '.join(unknown)})"
             items.append({
                 "action": action,
-                "date": r["date"].get().strip() or None,
+                "date": _join_when(r["date"].get(), r["time"].get()),
                 "type": typ,
                 "invitees": emails,
+                "notes": notes,
             })
         return items
 
+    # ------------------------------------------------------------ audit email
+    def _ledger(self) -> list[dict]:
+        """Every row as it stands — including the ones you unchecked.
+
+        The email is the audit artifact, so it records what was *skipped* too;
+        that is the half you cannot reconstruct later from Calendar alone.
+        """
+        return [
+            {
+                "owner": r["owner"],
+                "action": (r["action"].get().strip()
+                           + ("  [2nd pass]" if r["flagged"] else "")
+                           + ("" if r["include"].get() else "  [SKIPPED]")),
+                "date": _join_when(r["date"].get(), r["time"].get()),
+                "type": r["type"].get(),
+            }
+            for r in self.rows
+        ]
+
+    def _email_payload(self) -> tuple[str, str, str]:
+        """(subject, body, transcript_path) for either email path."""
+        when = self.meeting_date.get().strip() or date.today().isoformat()
+        subject = f"Meeting transcript — {getattr(self, '_run_name', 'meeting')} ({when})"
+        body = brain.format_coverage(self.coverage, self._ledger())
+        return subject, body, (getattr(self, "_meta", {}) or {}).get("txt_path", "")
+
+    def _email_target(self) -> str | None:
+        to = self.email_to.get().strip()
+        if not to or "@" not in to:
+            messagebox.showwarning("No address", "Enter an email address to send the transcript to.")
+            return None
+        return to
+
     def _create(self) -> None:
+        """The single send path: create the selected items, then email once.
+
+        With nothing selected but the email box ticked, this degrades to
+        transcript-only — the report still goes out, it just reports zero items.
+        """
+        blocked = [r for r in self.rows if r["include"].get() and self._row_problem(r)]
+        if blocked:
+            messagebox.showwarning(
+                "Fix these first",
+                f"{len(blocked)} selected item(s) are events with no date. Google Calendar "
+                "needs a date to create an event, so add one — or switch the item to Task.",
+            )
+            return
+
         items = self._gather_items()
-        if not items:
-            messagebox.showwarning("Nothing selected", "Check at least one item to create.")
+        email_to = ""
+        if self.email_on_create.get():
+            email_to = self._email_target() or ""
+            if not email_to:
+                return
+        if not items and not email_to:
+            messagebox.showwarning("Nothing to do", "Check an item to create, or tick the email box.")
             return
+
+        subject, body, path = self._email_payload()
+        if email_to and not path:
+            if not items:
+                messagebox.showerror(
+                    "No transcript file",
+                    "This run has no transcript file on disk to attach "
+                    "(pasted text is not written out).",
+                )
+                return
+            messagebox.showwarning(
+                "Nothing to attach",
+                "This run has no transcript file on disk, so the audit email will be skipped.",
+            )
+            email_to = ""
+
         n = len(items)
-        if not messagebox.askyesno(
-            "Create in Calendar / Tasks?",
-            f"This will create {n} item(s) in your '{self.account.get()}' account "
-            f"and email invites to any guests.\n\nProceed?",
-        ):
+        if n:
+            extra = f"\n\nIt will also email the transcript to {email_to}." if email_to else ""
+            prompt = (f"This will create {n} item(s) in your '{self.account.get()}' account "
+                      f"and email invites to any guests.{extra}\n\nProceed?")
+            title = "Create in Calendar / Tasks?"
+        else:
+            prompt = (f"Nothing is selected, so nothing will be created.\n\n"
+                      f"Email the transcript + report to {email_to}?")
+            title = "Email the transcript?"
+        if not messagebox.askyesno(title, prompt):
             return
-        self.create_worker = CreateWorker(items, self.account.get(), self.queue)
+
+        self._emailing = bool(email_to)
+        if not n:  # email-only — no Calendar/Tasks write at all
+            self.mail_status.config(text=f"sending to {email_to}…", foreground=MUTED)
+            EmailWorker(email_to, subject, body, path, self.account.get(), self.queue).start()
+            return
+
+        self.create_worker = CreateWorker(
+            items, self.account.get(), self.queue,
+            email_to=email_to, transcript_path=path,
+            email_subject=subject, coverage=self.coverage, ledger=self._ledger(),
+        )
         self._show_creating(n)
         self.create_worker.start()
 
@@ -603,6 +924,12 @@ class App:
         box.pack(fill="both", expand=True)
         box.insert("1.0", summary or "(no summary returned)")
         box.config(state="disabled")
+        # the audit email is sent after creation, so its outcome lands here
+        self.result_mail = ttk.Label(
+            self.body,
+            text="sending the transcript email…" if getattr(self, "_emailing", False) else "",
+            foreground=MUTED)
+        self.result_mail.pack(anchor="w", pady=(8, 0))
         ttk.Button(self.body, text="New meeting", command=self.show_setup).pack(anchor="w", pady=12)
 
     def _export(self) -> None:
@@ -636,6 +963,13 @@ class App:
                 self.prog_nums.config(text="")
                 self._set_indeterminate()
                 self.prog_eta.config(text="")
+            elif phase == "auditing":
+                self._phase_label = "auditing"
+                self._update_step("Double-checking")
+                self.prog_status.config(text="Double-checking for anything the first pass missed…")
+                self.prog_nums.config(text="")
+                self._set_indeterminate()
+                self.prog_eta.config(text="")
         elif tag == "progress":
             phase, frac = msg[1], msg[2]
             now = time.monotonic()
@@ -658,13 +992,21 @@ class App:
         elif tag == "transcribed":
             self._pending_meta = msg[1]
         elif tag == "proposed":
-            _notify("Meeting Assistant", f"Transcript ready — {len(msg[1])} items to review.")
-            self.show_review(msg[1], msg[2], getattr(self, "_pending_meta", {}))
+            coverage = msg[3] if len(msg) > 3 else None
+            n_missed = len((coverage or {}).get("missed") or [])
+            note = f" (+{n_missed} flagged by the 2nd pass)" if n_missed else ""
+            _notify("Meeting Assistant",
+                    f"Transcript ready — {len(msg[1])} items to review{note}.")
+            self.show_review(msg[1], msg[2], getattr(self, "_pending_meta", {}), coverage)
         elif tag == "cancelled":
             self.show_setup()
         elif tag == "error":
             log.error("error: %s", msg[1])
             messagebox.showerror("Something went wrong", msg[1])
+            self.show_setup()
+        elif tag == "auth_error":
+            log.error("auth: %s", msg[1])
+            self._prompt_sign_in(msg[1], installed=bool(msg[2]) if len(msg) > 2 else True)
             self.show_setup()
         elif tag == "created":
             _notify("Meeting Assistant", "Items created in Calendar / Tasks.")
@@ -673,6 +1015,61 @@ class App:
             log.error("create error: %s", msg[1])
             messagebox.showerror("Couldn't create items", msg[1])
             self.show_review_from_error()
+        elif tag == "emailed":
+            log.info("transcript emailed to %s", msg[1])
+            self._mail_note(f"✓ transcript emailed to {msg[1]}", OK)
+        elif tag == "email_error":
+            # never fatal: the items are already created / still on screen
+            log.error("email error: %s", msg[1])
+            self._mail_note(f"⚠ transcript email failed — {msg[1]}", WARN)
+
+    def _mail_note(self, text: str, color: str) -> None:
+        """Report the email outcome wherever the user currently is."""
+        for attr in ("mail_status", "result_mail"):
+            widget = getattr(self, attr, None)
+            try:
+                if widget is not None and widget.winfo_exists():
+                    widget.config(text=text, foreground=color)
+                    return
+            except tk.TclError:
+                continue
+
+    def _prompt_sign_in(self, detail: str, *, installed: bool = True) -> None:
+        """Turn an expired sign-in into a one-click fix instead of an error.
+
+        The whole app runs on the user's Claude subscription, so this fires on a
+        predictable schedule for the life of the install — it has to read as a
+        normal chore, not a crash.
+        """
+        path = brain.ensure_auth_command()
+        if not installed:
+            messagebox.showerror(
+                "Claude Code isn't installed",
+                "The Meeting Assistant needs Claude Code to read your transcripts.\n\n"
+                "Install it in Terminal with:\n\n"
+                "    npm install -g @anthropic-ai/claude-code\n\n"
+                "Then sign in by double-clicking:\n\n"
+                f"    {path}",
+            )
+            return
+        if messagebox.askyesno(
+            "Sign in to Claude",
+            f"{detail}\n\n"
+            "The Meeting Assistant uses your Claude subscription to read meetings, "
+            "and that sign-in has to be renewed now and then.\n\n"
+            "Open the sign-in window now?\n\n"
+            "(You can also double-click this file any time:\n"
+            f"{path})",
+        ):
+            try:
+                subprocess.run(["open", path], check=False, timeout=15)
+            except (OSError, subprocess.SubprocessError) as exc:
+                log.error("could not open auth.command: %s", exc)
+                messagebox.showerror(
+                    "Couldn't open the sign-in window",
+                    f"Open a Terminal and run:\n\n    claude auth login\n\n"
+                    f"Or double-click:\n{path}",
+                )
 
     def show_review_from_error(self) -> None:
         # creation failed after the review screen was torn down; go back to setup
@@ -682,6 +1079,9 @@ class App:
 
 def main() -> int:
     setup_logging()
+    # Before anything probes for `claude` / ffprobe: a Finder-launched app gets
+    # launchd's minimal PATH, not the shell's. Must run ahead of the auth check.
+    log.info("PATH repaired -> %s", trans_runner.ensure_path())
     try:
         root = tk.Tk()
         try:

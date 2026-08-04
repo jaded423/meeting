@@ -45,6 +45,15 @@ _TD_CHUNK = re.compile(r"chunk (\d+)/(\d+)")
 #   "  [diar] segmentation 12/34 (35%)"
 _TD_DIAR = re.compile(r"\[diar\]\s+(\w+)\s+\d+/\d+\s+\((\d+)%\)")
 
+# What pyannote starts doing once a sub-phase's counter tops out. Both of these
+# run silently — they emit no progress lines at all — and clustering can take
+# minutes on a long meeting. Used to label the indeterminate stretch (see
+# `_emit_transd_progress`).
+_DIAR_NEXT = {
+    "segmentation": "building embeddings",
+    "embeddings": "clustering speakers",
+}
+
 def _detect_apple_silicon() -> bool:
     """True on Apple Silicon hardware — even when the caller runs under Rosetta.
 
@@ -81,7 +90,19 @@ def _emit_transd_progress(line: str, on_progress) -> None:
     """Map a transd stdout line to an on_progress(phase, fraction) call."""
     m = _TD_DIAR.search(line)  # real pyannote progress (segmentation / embeddings)
     if m:
-        on_progress(f"Diarizing ({m.group(1)})", int(m.group(2)) / 100.0)
+        stage, pct = m.group(1), int(m.group(2))
+        if pct >= 100:
+            # The counter tops out and pyannote moves to a silent sub-phase.
+            # Reporting 1.0 here pins the bar at 100% with ETA 0:00 while real
+            # work continues (~5 min of clustering on a 28-min meeting), so a
+            # healthy run reads as hung. Hand back an indeterminate phase
+            # instead: marquee bar, no bogus ETA, and a label saying what it is
+            # doing. The suffix preserves `_phase_key`'s prefix match in the GUI,
+            # so "STEP n OF m" still resolves to the same step.
+            on_progress(f"Diarizing ({stage}) — {_DIAR_NEXT.get(stage.lower(), 'finishing')}",
+                        None)
+        else:
+            on_progress(f"Diarizing ({stage})", pct / 100.0)
         return
     m = _TD_PCT.search(line)
     if m:
@@ -114,6 +135,55 @@ def _resolve_bin(name: str) -> str:
     raise TransError(f"{name} not found (looked in {SCRIPTS_BIN} and PATH)")
 
 
+# pyannote's models are gated, so transd requires HF_TOKEN (see `transd` line ~72).
+# It reaches us from the shell on a terminal launch — but a Finder-launched app
+# inherits launchd's environment and never sources a profile, so the token has to
+# come off disk. Ordered by precedence; first non-empty hit wins.
+_HF_TOKEN_FILES = [
+    HOME / ".secrets" / "hf_token",             # local-secrets one-home pattern
+    HOME / ".cache" / "huggingface" / "token",  # written by `huggingface-cli login`
+]
+
+# Colour codes from the child's output land verbatim in a GUI error dialog.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def hf_token() -> str | None:
+    """The pyannote gated-model token: environment first, then disk.
+
+    Returns None when there is none anywhere, so callers can fail with something
+    actionable instead of letting transd exit 1. The value is never logged.
+    """
+    tok = (os.environ.get("HF_TOKEN") or "").strip()
+    if tok:
+        return tok
+    for path in _HF_TOKEN_FILES:
+        try:
+            tok = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if tok:
+            return tok
+    return None
+
+
+def ensure_path() -> str:
+    """Repair this process's own `PATH` from `_PATH_EXTRA`; return the new value.
+
+    A GUI launched from Finder / LaunchServices (double-click, or `open`) inherits
+    launchd's minimal PATH — `/usr/bin:/bin:/usr/sbin:/sbin` — not the shell's. So
+    `claude` (installed at `~/.local/bin`), `ffprobe` and friends are invisible, and
+    the app tells you they aren't installed on a Mac where they plainly are.
+
+    Child processes already got this treatment via `_augmented_env()`; this extends
+    it to the interpreter itself, so in-process `shutil.which(...)` and bare
+    `subprocess.run(["claude", ...])` resolve too. Idempotent — `_augmented_env()`
+    dedupes, so calling this repeatedly can't grow PATH.
+    """
+    os.environ["PATH"] = _augmented_env()["PATH"]
+    return os.environ["PATH"]
+
+
 def _augmented_env() -> dict[str, str]:
     env = dict(os.environ)
     parts = _PATH_EXTRA + env.get("PATH", "").split(os.pathsep)
@@ -124,6 +194,9 @@ def _augmented_env() -> dict[str, str]:
             seen.add(p)
             ordered.append(p)
     env["PATH"] = os.pathsep.join(ordered)
+    tok = hf_token()
+    if tok:
+        env["HF_TOKEN"] = tok
     return env
 
 
@@ -169,6 +242,17 @@ def run(
         }
 
     bin_name = "transd" if diarize else "trans"
+    if diarize and not hf_token():
+        # Fail here rather than 30s in with transd's exit 1, which reaches the GUI
+        # as an 800-char output tail. Only diarization needs the gated models.
+        raise TransError(
+            "Speaker diarization needs a Hugging Face token (the pyannote models "
+            "are gated).\n\n"
+            "Create a read-scope token at https://hf.co/settings/tokens and save it "
+            f"to {_HF_TOKEN_FILES[0]} (chmod 600), then accept the model terms at "
+            "https://hf.co/pyannote/speaker-diarization-3.1\n\n"
+            "Or turn diarization off to transcribe without speaker labels."
+        )
     binary = _resolve_bin(bin_name)
     out_dir = Path(output_dir).expanduser() if output_dir else DEFAULT_OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +299,7 @@ def run(
 
     txt_path = out_dir / f"{run_name}.txt"
     if proc.returncode != 0 or not txt_path.is_file():
-        tail = "".join(lines).strip()[-800:]
+        tail = _ANSI.sub("", "".join(lines)).strip()[-800:]
         raise TransError(
             f"{bin_name} failed (exit {proc.returncode}); no transcript at "
             f"{txt_path}. Output tail:\n{tail}"
