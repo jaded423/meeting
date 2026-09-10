@@ -25,6 +25,10 @@ GUI app **BUILT + hardened through live testing 2026-07-23** (`meeting/assistant
 > ⚠ Read the item carefully before starting — **"no terminal" is already half-true.** `MeetingAssistant.app/Contents/MacOS/` is a dev launcher that double-clicks open with no terminal window (it forces `arch -arm64`, MLX being arm64-only). What it still needs is the **repo + `.venv` present at `~/projects/meeting`**, so it is a launcher, not a distributable. The real gap is the PyInstaller bundle + the `install.command` steps below — not the terminal itself.
 
 - [ ] **Package for the VM/Cody — PyInstaller `.app`.** `added 2026-07-20`. Build under **arm64 Python** (MLX). Supersedes `meeting-kit` v0.1.x (that installed Claude *Desktop* + the *meeting MCP*); new arch = the `.app` + `claude` CLI + gsuite-on-CLI. Then Cody-settings timed run on the VM (M3 Pro / 18 GB).
+      resume: 2026-09-09 — deltas (1) and (2) are now TRUE on Cody's REAL Mac, not just the
+      VM: he installed Claude Code (Ghostty) + Claude Desktop + gsuite (full features,
+      prompt-gated, registered at BOTH CLI user scope and Desktop) from gsuite/INSTALL.md
+      unattended, tests verified. Brain `cody-gsuite-install`. Remaining = the `.app` build itself.
       **Delta from the proven-on-VM state (settled 2026-07-24)** — everything else was already validated there under Claude Desktop:
       (1) **`claude` CLI installed + `claude auth login`** on Cody's own Max account. This is the only genuinely new dependency; `brain.py` blanks `ANTHROPIC_API_KEY` so it always resolves to the subscription — no API key, nothing to configure. ✅ Made self-service 2026-07-24 (`auth.command` + pre-flight; see changelog).
       (2) **Re-register gsuite at CLI user scope** (`claude mcp add … -s user`). Desktop and the CLI keep MCP config in *different* stores, so this is a second registration — but the **same** server and the **same** Google OAuth grant in `~/.config/gsuite-<acct>/`, so the VM's OAuth proof still stands. Keep the Desktop registration too: Cody uses full gsuite from Desktop, the app taps gsuite via the CLI.
