@@ -62,7 +62,7 @@ GUI app **BUILT + hardened through live testing 2026-07-23** (`meeting/assistant
       **`$USER`** — strip it and `auth status` says `loggedIn:false` even with a good PATH.
       A real Finder launch **does** pass `USER`/`HOME`/`LOGNAME` (only `PATH` is minimal), so
       this is a testing trap, not a shipping bug. Don't "fix" it.
-- [ ] **Move `HF_TOKEN` out of the shell into `~/.secrets/hf_token` (Joshua's action).**
+- [x] **Move `HF_TOKEN` out of the shell into `~/.secrets/hf_token` (Joshua's action).** DONE 2026-07-28 (file 600 present, rotated; no `export HF_TOKEN` in any zshrc — verified on the Pocket 2026-09-19)
       `added 2026-07-28`. App-side plumbing is DONE (item below); this is the one manual step.
       **The old token was leaked into a session transcript 2026-07-28 and must be rotated** —
       same failure mode as the Anthropic key on 2026-07-10, and the same fix: a file, not a
@@ -172,3 +172,4 @@ GUI app **BUILT + hardened through live testing 2026-07-23** (`meeting/assistant
 ## Deferred
 
 - [ ] **Distribute to Cody (BLOCKED on Cody).** `added 2026-07-08`. Needs his Mac specs (M-series? RAM) + Plaud-device-vs-audio-file capture answer.
+- [ ] Bring `meeting` MCP to the Pocket: resurrect diarization natively — second venv with pyannote.audio (speaker-diarization-3.1, gated → `~/.secrets/hf_token`) + CPU torch, whisper side = `~/.venvs/whisper` (faster-whisper, 12x realtime on distil per the 2026-09-19 bench), port `transd`'s align step. Test on a recorded meeting, not a sermon. Background: `~/projects/pocket/docs/local-ai.md`. (added 2026-09-19)
